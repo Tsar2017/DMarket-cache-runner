@@ -36,36 +36,3 @@ for unit_type in unit_types:
 if failed:
     print("isolated_refresh_failed unit_types="+", ".join(failed),file=sys.stderr,flush=True)
     raise SystemExit(1)
-workflow="""name: Refresh DMarkeT market cache
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "17 */6 * * *"
-
-concurrency:
-  group: dmarket-cache-refresh
-  cancel-in-progress: false
-
-permissions:
-  contents: read
-
-jobs:
-  refresh:
-    runs-on: ubuntu-latest
-    timeout-minutes: 75
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements.txt
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
-      - name: Refresh all bedroom caches
-        env:
-          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
-        run: python main.py
-"""
-Path(".github/workflows/task.yml").write_text(workflow,encoding="utf-8")
