@@ -1,18 +1,35 @@
 from __future__ import annotations
-import base64,json,os,subprocess,sys
+import base64,json,os,shutil,subprocess,sys,time
 from pathlib import Path
 payload=json.loads(base64.urlsafe_b64decode(os.environ["GITHUB_TOKEN"]).decode())
 os.environ.update(payload)
 os.environ["HEADLESS_BROWSER"]="true"
-os.environ["DMARKET_PROFILE_DIR"]="/tmp/dmarket-browser-profile"
 os.environ["MARKET_CACHE_TTL_SECONDS"]="21600"
 os.environ["MAX_LINK_CHECKS_PER_SOURCE"]="1"
 os.environ["LINK_CHECK_SECONDS"]="4"
+os.environ["MARKET_CACHE_REQUIRED_SOURCES"]="RentFaster,Rentals.ca"
 os.environ["CHROME_PATH"]=next((p for p in ("/usr/bin/google-chrome","/usr/bin/google-chrome-stable","/usr/bin/chromium") if Path(p).exists()),"google-chrome")
 os.environ["CHROMEDRIVER_PATH"]="/usr/bin/chromedriver" if Path("/usr/bin/chromedriver").exists() else ""
-result=subprocess.call([sys.executable,"refresh_market_cache.py"])
-if result == 0:
-    workflow = """name: Refresh DMarkeT market cache
+unit_types=("Bachelor","1 bedroom","2 bedroom","3 bedroom","4 bedroom")
+failed=[]
+for unit_type in unit_types:
+    succeeded=False
+    for attempt in range(1,4):
+        profile=Path("/tmp") / ("dmarket-" + unit_type.replace(" ","-") + f"-{attempt}")
+        shutil.rmtree(profile,ignore_errors=True)
+        env=os.environ.copy()
+        env["DMARKET_PROFILE_DIR"]=str(profile)
+        print(f"isolated_refresh unit_type={unit_type!r} attempt={attempt}",flush=True)
+        if subprocess.call([sys.executable,"refresh_market_cache.py",unit_type],env=env)==0:
+            succeeded=True
+            break
+        time.sleep(5)
+    if not succeeded:
+        failed.append(unit_type)
+if failed:
+    print("isolated_refresh_failed unit_types=" + ", ".join(failed),file=sys.stderr,flush=True)
+    raise SystemExit(1)
+workflow="""name: Refresh DMarkeT market cache
 
 on:
   workflow_dispatch:
@@ -44,5 +61,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
         run: python main.py
 """
-    Path(".github/workflows/task.yml").write_text(workflow, encoding="utf-8")
-raise SystemExit(result)
+Path(".github/workflows/task.yml").write_text(workflow,encoding="utf-8")
