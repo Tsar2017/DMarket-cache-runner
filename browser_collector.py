@@ -353,7 +353,7 @@ def _matching_floorplans(node: dict, target_beds: int) -> list[dict]:
 
 def _rentals_search_response(driver, page_url: str) -> dict | None:
     """Wait for Rentals.ca's search store, retrying transient empty loads."""
-    for _navigation_attempt in range(3):
+    for _navigation_attempt in range(5):
         driver.get(page_url)
         for _poll_attempt in range(30):
             candidate_response = driver.execute_script(
