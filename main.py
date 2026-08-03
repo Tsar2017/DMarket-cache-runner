@@ -3,7 +3,7 @@ import base64,json,os,subprocess,sys
 from pathlib import Path
 payload=json.loads(base64.urlsafe_b64decode(os.environ["GITHUB_TOKEN"]).decode())
 os.environ.update(payload)
-os.environ["HEADLESS_BROWSER"]="false"
+os.environ["HEADLESS_BROWSER"]="true"
 os.environ["DMARKET_PROFILE_DIR"]="/tmp/dmarket-browser-profile"
 os.environ["MARKET_CACHE_TTL_SECONDS"]="21600"
 os.environ["MAX_LINK_CHECKS_PER_SOURCE"]="40"
