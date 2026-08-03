@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import uuid
 
@@ -8,6 +9,29 @@ from supabase_cache import SupabaseMarketCache
 
 
 UNIT_TYPES = ("Bachelor", "1 bedroom", "2 bedroom", "3 bedroom", "4 bedroom")
+
+
+def selected_unit_types(arguments: list[str]) -> tuple[str, ...]:
+    if not arguments:
+        return UNIT_TYPES
+    if len(arguments) != 1 or arguments[0] not in UNIT_TYPES:
+        choices = ", ".join(UNIT_TYPES)
+        raise ValueError(f"Expected one unit type ({choices}).")
+    return (arguments[0],)
+
+
+def missing_required_sources(collected: dict) -> list[str]:
+    required = {
+        name.strip()
+        for name in os.environ.get("MARKET_CACHE_REQUIRED_SOURCES", "").split(",")
+        if name.strip()
+    }
+    available = {
+        row.get("sourceWebsite")
+        for row in collected.get("candidates", [])
+        if row.get("sourceWebsite")
+    }
+    return sorted(required - available)
 
 
 def omit_failed_sources(collected: dict) -> dict:
@@ -35,6 +59,11 @@ def refresh_unit_type(cache: SupabaseMarketCache, unit_type: str) -> bool:
     try:
         collected = collect_browser_candidates(unit_type)
         collected = omit_failed_sources(collected)
+        missing_sources = missing_required_sources(collected)
+        if missing_sources:
+            raise RuntimeError(
+                "Required sources returned no listings: " + ", ".join(missing_sources)
+            )
         failed_sources = [
             status
             for status in collected.get("statuses", [])
@@ -51,12 +80,19 @@ def refresh_unit_type(cache: SupabaseMarketCache, unit_type: str) -> bool:
         return False
 
 
-def main() -> int:
+def main(arguments: list[str] | None = None) -> int:
     cache = SupabaseMarketCache()
     if not cache.enabled:
         print("SUPABASE_URL and SUPABASE_SECRET_KEY are required.", file=sys.stderr)
         return 2
-    results = [refresh_unit_type(cache, unit_type) for unit_type in UNIT_TYPES]
+    try:
+        unit_types = selected_unit_types(
+            sys.argv[1:] if arguments is None else arguments
+        )
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    results = [refresh_unit_type(cache, unit_type) for unit_type in unit_types]
     return 0 if any(results) else 1
 
 
