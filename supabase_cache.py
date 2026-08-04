@@ -5,7 +5,7 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -13,9 +13,21 @@ class SupabaseCacheError(RuntimeError):
     pass
 
 
+def normalize_supabase_url(value: str) -> str:
+    url = value.strip().rstrip("/")
+    if not url:
+        return ""
+    parsed = urlsplit(url)
+    if parsed.scheme and parsed.netloc:
+        return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    marker = "/rest/v1"
+    index = url.lower().find(marker)
+    return url[:index].rstrip("/") if index >= 0 else url
+
+
 class SupabaseMarketCache:
     def __init__(self) -> None:
-        self.url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        self.url = normalize_supabase_url(os.environ.get("SUPABASE_URL", ""))
         self.secret_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
         self.ttl = timedelta(seconds=max(60, int(os.environ.get("MARKET_CACHE_TTL_SECONDS", "3600"))))
 
