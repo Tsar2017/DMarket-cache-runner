@@ -45,7 +45,7 @@ BROWSER_USER_AGENT = (
 APARTMENTS_BROWSER_USER_AGENT = BROWSER_USER_AGENT
 LINK_CHECK_SECONDS = max(4, int(os.environ.get("LINK_CHECK_SECONDS", "12")))
 MAX_LINK_CHECKS_PER_SOURCE = max(1, int(os.environ.get("MAX_LINK_CHECKS_PER_SOURCE", "40")))
-MARKET_CACHE_PAYLOAD_VERSION = 2
+MARKET_CACHE_PAYLOAD_VERSION = 3
 
 
 def _log_source(name: str, query: str, status: dict, started_at: float, error: Exception | None = None) -> None:
@@ -1211,6 +1211,9 @@ def _advertisement_page_text(driver, url: str) -> str:
     except WebDriverException:
         return ""
     deadline = time.monotonic() + LINK_CHECK_SECONDS
+    best_body = ""
+    last_body = ""
+    stable_polls = 0
     while time.monotonic() < deadline:
         time.sleep(0.5)
         try:
@@ -1229,9 +1232,26 @@ def _advertisement_page_text(driver, url: str) -> str:
         if "just a moment" in title or "access denied" in title:
             return ""
         body_text = str(state.get("bodyText", ""))
-        if state.get("ready") == "complete" and body_text:
+        if len(body_text) > len(best_body):
+            best_body = body_text
+        if not body_text:
+            continue
+        stable_polls = stable_polls + 1 if body_text == last_body else 1
+        last_body = body_text
+        decisive_occupancy_text = re.search(
+            r"\b(?:1|one)\s+(?:private\s+)?room\s+in\s+(?:a\s+)?"
+            r"[1-4]\s*(?:bed(?:room)?s?|bdrms?)\b.{0,60}\bshared\b|"
+            r"\bper\s+(?:bedroom|room)\b|"
+            r"\bshared\s+accommodations?\b|"
+            r"\bindividual(?:ly)?\s+(?:leased|lease|leasing)\b",
+            body_text,
+            re.I,
+        )
+        if decisive_occupancy_text:
             return body_text
-    return ""
+        if state.get("ready") == "complete" and stable_polls >= 5:
+            return body_text
+    return best_body
 
 
 def _classify_occupancy_pages(candidates: list[dict], target_beds: int) -> None:
@@ -1328,6 +1348,7 @@ def collect_browser_candidates(
     with BROWSER_LOCK:
         candidates = []
         statuses = []
+        target_beds = _unit_details(unit_type)[0]
 
         def run_source(source_name: str, collector) -> list[dict]:
             started_at = time.monotonic()
@@ -1355,6 +1376,10 @@ def collect_browser_candidates(
         candidates.extend(
             run_source("Rentals.ca", lambda driver: _collect_rentals(driver, unit_type, origin, our_rent))
         )
+        # RentFaster pages expose richer occupancy evidence than the map feed.
+        # Classify those rows before Apartments.com cross-index copies are
+        # created so an exact copy inherits the audited decision.
+        _classify_occupancy_pages(candidates, target_beds)
         apartment_seeds = list(candidates)
         candidates.extend(
             run_source(
@@ -1362,8 +1387,6 @@ def collect_browser_candidates(
                 lambda driver: _collect_apartments(driver, unit_type, apartment_seeds, origin, our_rent),
             )
         )
-        target_beds = _unit_details(unit_type)[0]
-        _classify_occupancy_pages(candidates, target_beds)
         candidates = _remove_dead_links(candidates)
         for status in statuses:
             survivors = sum(1 for row in candidates if row.get("sourceWebsite") == status.get("name"))
