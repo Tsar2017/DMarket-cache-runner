@@ -1,5 +1,5 @@
 from __future__ import annotations
-import base64,json,os,shutil,subprocess,sys,time
+import base64,json,os,shutil,subprocess,sys,time,uuid
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
 payload=json.loads(base64.urlsafe_b64decode(os.environ["GITHUB_TOKEN"]).decode())
@@ -12,6 +12,7 @@ os.environ["MARKET_CACHE_REQUIRED_SOURCES"]="RentFaster,Rentals.ca"
 os.environ["CHROME_PATH"]=next((p for p in ("/usr/bin/google-chrome","/usr/bin/google-chrome-stable","/usr/bin/chromium") if Path(p).exists()),"google-chrome")
 os.environ["CHROMEDRIVER_PATH"]="/usr/bin/chromedriver" if Path("/usr/bin/chromedriver").exists() else ""
 from supabase_cache import SupabaseMarketCache
+from refresh_market_cache import record_skipped_job
 cache=SupabaseMarketCache()
 required={"RentFaster","Rentals.ca"}
 unit_types=("Bachelor","1 bedroom","2 bedroom","3 bedroom","4 bedroom")
@@ -21,7 +22,10 @@ for unit_type in unit_types:
     collected_at=datetime.fromisoformat(existing["collectedAt"].replace("Z","+00:00")) if existing and existing.get("collectedAt") else None
     sources={row.get("sourceWebsite") for row in existing.get("candidates",[])} if existing else set()
     if collected_at and datetime.now(timezone.utc)-collected_at < timedelta(hours=4) and required <= sources:
-        print(f"isolated_refresh_skip_fresh unit_type={unit_type!r}",flush=True)
+        job_id=str(uuid.uuid4())
+        cache.create_job(job_id,unit_type)
+        record_skipped_job(cache,job_id)
+        print(f"isolated_refresh_skip_fresh unit_type={unit_type!r} job_id={job_id!r}",flush=True)
         continue
     succeeded=False
     for attempt in range(1,4):
