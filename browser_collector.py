@@ -13,7 +13,7 @@ import threading
 import time
 from datetime import date
 from pathlib import Path
-from urllib.parse import quote, unquote, urlencode, urlparse
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -232,6 +232,82 @@ def _rentfaster_exact_bedrooms(value: str, target_beds: int) -> bool:
     return bool(re.fullmatch(rf"{target_beds}(?:\s*\+\s*den)?", cleaned))
 
 
+def _rentfaster_street_address(value) -> str:
+    cleaned = html.unescape(str(value or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"(?:,\s*)?calgary(?:,\s*(?:alberta|ab))?\s*$", "", cleaned, flags=re.I)
+    cleaned = cleaned.strip(" ,")
+    if not re.search(r"\d", cleaned) or not re.search(r"[a-z]", cleaned, flags=re.I):
+        return ""
+    return cleaned
+
+
+def _rentfaster_address_from_link(link) -> str:
+    path = unquote(urlparse(str(link or "")).path)
+    match = re.search(r"/properties/([^/?#]+)$", path, flags=re.I)
+    if not match:
+        return ""
+    slug = re.sub(r"-\d+$", "", match.group(1))
+    slug = re.sub(r"-calgary$", "", slug, flags=re.I)
+    if not re.match(r"^\d+(?:-|$)", slug) or not re.search(r"[a-z]", slug, flags=re.I):
+        return ""
+
+    replacements = {
+        "ave": "Avenue",
+        "avenue": "Avenue",
+        "blvd": "Boulevard",
+        "boulevard": "Boulevard",
+        "cir": "Circle",
+        "circle": "Circle",
+        "cres": "Crescent",
+        "crescent": "Crescent",
+        "ct": "Court",
+        "court": "Court",
+        "dr": "Drive",
+        "drive": "Drive",
+        "pl": "Place",
+        "place": "Place",
+        "rd": "Road",
+        "road": "Road",
+        "st": "Street",
+        "street": "Street",
+        "trl": "Trail",
+        "trail": "Trail",
+    }
+    directions = {"n", "ne", "e", "se", "s", "sw", "w", "nw"}
+    words = []
+    for token in slug.split("-"):
+        lower = token.lower()
+        if lower in directions:
+            words.append(lower.upper())
+        elif lower in replacements:
+            words.append(replacements[lower])
+        elif re.fullmatch(r"\d+(?:st|nd|rd|th)", lower):
+            words.append(lower)
+        else:
+            words.append(token.title())
+    return _rentfaster_street_address(" ".join(words))
+
+
+def _rentfaster_listing_address(listing: dict) -> str:
+    for field in (
+        "address",
+        "street_address",
+        "streetAddress",
+        "full_address",
+        "fullAddress",
+    ):
+        street = _rentfaster_street_address(listing.get(field))
+        if street:
+            return f"{street}, Calgary, AB"
+    street = _rentfaster_address_from_link(listing.get("link"))
+    return f"{street}, Calgary, AB" if street else ""
+
+
+def _rentfaster_listing_url(link) -> str:
+    return urljoin("https://www.rentfaster.ca", str(link or "").strip())
+
+
 def _collect_rentfaster(driver, unit_type: str) -> tuple[list[dict], dict]:
     beds, normalized_unit, rentfaster_slug, _ = _unit_details(unit_type)
     params = [
@@ -282,11 +358,14 @@ def _collect_rentfaster(driver, unit_type: str) -> tuple[list[dict], dict]:
         if not rent or latitude is None or longitude is None:
             continue
         promotions = _string_list(listing.get("promotions")).replace("_", " ").title()
+        listing_address = _rentfaster_listing_address(listing)
+        listing_url = _rentfaster_listing_url(listing.get("link"))
+        source_listing_id = str(listing.get("id") or listing.get("ref_id") or "").strip()
         candidates.append(
             {
                 "companyName": "Independent",
-                "buildingName": listing.get("title") or listing.get("address") or "RentFaster listing",
-                "address": f"{listing.get('address', '')}, Calgary, AB",
+                "buildingName": listing.get("title") or listing_address or "RentFaster listing",
+                "address": listing_address,
                 "latitude": float(latitude),
                 "longitude": float(longitude),
                 "unitType": normalized_unit,
@@ -307,7 +386,8 @@ def _collect_rentfaster(driver, unit_type: str) -> tuple[list[dict], dict]:
                 "utilitiesNotes": _string_list(listing.get("utilities_included")),
                 "comments": "Active same-bedroom listing collected automatically from RentFaster.",
                 "sourceWebsite": "RentFaster",
-                "listingUrl": "https://www.rentfaster.ca" + listing.get("link", ""),
+                "listingUrl": listing_url,
+                "sourceListingId": source_listing_id,
                 "isVerified": True,
                 "verifiedAt": date.today().isoformat(),
                 "promotionText": promotions,
