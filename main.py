@@ -14,6 +14,8 @@ from typing import Callable
 
 
 REQUIRED_SOURCES = {"RentFaster", "Rentals.ca"}
+SOURCE_STATUS_REQUIRED_FOR_FRESH_SKIP = {"Apartments.com"}
+SUCCESSFUL_SOURCE_STATUSES = {"verified", "no-match"}
 UNIT_TYPES = ("Bachelor", "1 bedroom", "2 bedroom", "3 bedroom", "4 bedroom")
 MARKET_CACHE_PAYLOAD_VERSION = 3
 
@@ -58,6 +60,15 @@ def cache_is_runner_fresh(
     sources = {
         row.get("sourceWebsite") for row in existing.get("candidates", [])
     }
+    statuses = {
+        status.get("name"): status.get("status")
+        for status in existing.get("statuses", [])
+        if status.get("name")
+    }
+    optional_sources_are_healthy = all(
+        statuses.get(source) in SUCCESSFUL_SOURCE_STATUSES
+        for source in SOURCE_STATUS_REQUIRED_FOR_FRESH_SKIP
+    )
     candidates = existing.get("candidates", [])
     required_payload_version = (
         MARKET_CACHE_PAYLOAD_VERSION
@@ -72,6 +83,7 @@ def cache_is_runner_fresh(
     return (
         current_time - collected_at < timedelta(hours=4)
         and REQUIRED_SOURCES <= sources
+        and optional_sources_are_healthy
         and payload_is_current
     )
 
