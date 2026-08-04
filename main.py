@@ -15,6 +15,7 @@ from typing import Callable
 
 REQUIRED_SOURCES = {"RentFaster", "Rentals.ca"}
 UNIT_TYPES = ("Bachelor", "1 bedroom", "2 bedroom", "3 bedroom", "4 bedroom")
+MARKET_CACHE_PAYLOAD_VERSION = 2
 
 
 def configure_environment() -> None:
@@ -55,10 +56,16 @@ def cache_is_runner_fresh(
     sources = {
         row.get("sourceWebsite") for row in existing.get("candidates", [])
     }
+    candidates = existing.get("candidates", [])
+    payload_is_current = bool(candidates) and all(
+        row.get("marketCachePayloadVersion") == MARKET_CACHE_PAYLOAD_VERSION
+        for row in candidates
+    )
     current_time = now or datetime.now(timezone.utc)
     return (
         current_time - collected_at < timedelta(hours=4)
         and REQUIRED_SOURCES <= sources
+        and payload_is_current
     )
 
 
