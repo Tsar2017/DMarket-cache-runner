@@ -88,6 +88,13 @@ def cache_is_runner_fresh(
     )
 
 
+def force_refresh_requested() -> bool:
+    return (
+        os.environ.get("GITHUB_EVENT_NAME", "").strip().lower()
+        == "workflow_dispatch"
+    )
+
+
 def record_fresh_skip(
     cache,
     unit_type: str,
@@ -105,13 +112,21 @@ def record_fresh_skip(
 
 def refresh_one_unit_type(cache, unit_type: str) -> bool:
     existing = cache.load_latest(unit_type)
-    if cache_is_runner_fresh(existing, unit_type=unit_type):
+    if (
+        not force_refresh_requested()
+        and cache_is_runner_fresh(existing, unit_type=unit_type)
+    ):
         job_id = record_fresh_skip(cache, unit_type)
         print(
             f"isolated_refresh_skip_fresh unit_type={unit_type!r} job_id={job_id!r}",
             flush=True,
         )
         return True
+    if force_refresh_requested():
+        print(
+            f"isolated_refresh_forced unit_type={unit_type!r}",
+            flush=True,
+        )
 
     for attempt in range(1, 4):
         profile = Path("/tmp") / (
