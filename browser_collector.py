@@ -308,6 +308,198 @@ def _rentfaster_listing_url(link) -> str:
     return urljoin("https://www.rentfaster.ca", str(link or "").strip())
 
 
+def _rent_value(value) -> int | None:
+    match = re.search(r"[\d,]+", str(value or ""))
+    return int(match.group(0).replace(",", "")) if match else None
+
+
+def _advertised_bedroom_counts(value: str) -> set[int]:
+    text = re.sub(r"\s+", " ", str(value or "").lower())
+    words = {"one": 1, "two": 2, "three": 3, "four": 4}
+    counts = {
+        int(match.group(1))
+        for match in re.finditer(r"\b([1-4])[\s-]*(?:bed(?:room)?s?|bdrms?)\b", text)
+    }
+    counts.update(
+        words[match.group(1)]
+        for match in re.finditer(
+            r"\b(one|two|three|four)[\s-]*(?:bed(?:room)?s?|bdrms?)\b",
+            text,
+        )
+    )
+    for match in re.finditer(
+        r"\b([1-4])\s*(?:&|and)\s*([1-4])[\s-]*(?:bed(?:room)?s?|bdrms?)\b",
+        text,
+    ):
+        counts.update((int(match.group(1)), int(match.group(2))))
+    return counts
+
+
+def _unit_description_match(
+    title: str,
+    target_beds: int,
+    advertisement_text: str = "",
+) -> tuple[str, str]:
+    if target_beds == 0:
+        return ("match", "") if re.search(r"\b(?:studio|bachelor)\b", title, re.I) else ("unknown", "")
+    counts = _advertised_bedroom_counts(title)
+    evidence_label = "title"
+    if not counts:
+        description_counts = _advertised_bedroom_counts(advertisement_text)
+        # A building advertisement may enumerate many legitimate floor plans.
+        # Treat descriptive text as contradictory only when it makes one
+        # unambiguous bedroom claim.
+        if len(description_counts) == 1:
+            counts = description_counts
+            evidence_label = "description"
+    if counts:
+        if target_beds in counts:
+            return "match", ""
+        return (
+            "mismatch",
+            f"Advertisement {evidence_label} describes {sorted(counts)} bedroom(s), not {target_beds}.",
+        )
+    return "unknown", ""
+
+
+def _shared_room_evidence(
+    text: str,
+    target_beds: int,
+    rent: int | None,
+    structured_type: str = "",
+) -> tuple[str, str]:
+    normalized_type = re.sub(r"\s+", " ", str(structured_type or "").strip().lower())
+    if normalized_type in {"room", "room for rent", "shared", "bed space", "bedspace"}:
+        return "structured-room-offering", f"Structured source type: {structured_type}."
+
+    lines = [re.sub(r"\s+", " ", line).strip() for line in str(text or "").splitlines()]
+    lines = [line for line in lines if line]
+    room_in_shared = re.compile(
+        r"\b(?:1|one)\s+(?:private\s+)?room\s+in\s+(?:a\s+)?"
+        r"([1-4])\s*(?:bed(?:room)?s?|bdrms?)\b.{0,60}\bshared\b",
+        re.I,
+    )
+    for index, line in enumerate(lines):
+        match = room_in_shared.search(line)
+        if not match:
+            continue
+        context = " ".join(lines[index : index + 3])
+        prices = {
+            int(value.replace(",", ""))
+            for value in re.findall(r"\$\s*([\d,]+)", context)
+        }
+        offered_beds = int(match.group(1))
+        if offered_beds == target_beds or (rent is not None and rent in prices):
+            return "shared-room-offering", line[:500]
+
+    compact = " ".join(lines)
+    decisive_patterns = (
+        r"\bprivate\s+bedroom\b",
+        r"\b(?:private\s+)?(?:bedroom|room)\s+for\s+rent\b",
+        r"\brent(?:ed|ing)?\s+by\s+the\s+(?:bedroom|room)\b",
+        r"\bindividual(?:ly)?\s+(?:leased|lease|leasing)\b",
+        r"\bper\s+(?:bedroom|room)\b",
+        r"\bshared\s+accommodations?\b",
+        r"\bbed\s*space\b",
+    )
+    for pattern in decisive_patterns:
+        match = re.search(pattern, compact, re.I)
+        if not match:
+            continue
+        context = compact[max(0, match.start() - 160) : match.end() + 160]
+        prices = {
+            int(value.replace(",", ""))
+            for value in re.findall(r"\$\s*([\d,]+)", context)
+        }
+        if not prices or rent is None or rent in prices:
+            return "explicit-room-language", context[:500]
+    return "", ""
+
+
+def _full_unit_evidence(text: str) -> tuple[str, str]:
+    compact = re.sub(r"\s+", " ", str(text or "")).strip()
+    match = re.search(
+        r"\b(?:entire|complete)\s+(?:apartment|unit|suite|home)\b|"
+        r"\bfull[- ](?:apartment|unit|suite)\s+rental\b",
+        compact,
+        re.I,
+    )
+    if not match:
+        return "", ""
+    context = compact[max(0, match.start() - 160) : match.end() + 160]
+    return "explicit-full-unit-language", context[:500]
+
+
+def _annotate_occupancy(
+    candidate: dict,
+    target_beds: int,
+    advertisement_text: str = "",
+    structured_type: str = "",
+) -> dict:
+    title = str(candidate.get("advertisementTitle") or candidate.get("buildingName") or "")
+    candidate["advertisementTitle"] = title
+    candidate["occupancyClassification"] = "unknown"
+    candidate["occupancyReason"] = ""
+    candidate["occupancyEvidence"] = ""
+    candidate["advertisementText"] = re.sub(
+        r"\s+\n",
+        "\n",
+        str(advertisement_text or "").strip(),
+    )[:8000]
+    candidate["structuredOccupancyEvidence"] = str(structured_type or "").strip()
+    unit_match, unit_reason = _unit_description_match(
+        title,
+        target_beds,
+        advertisement_text,
+    )
+    candidate["advertisedUnitMatch"] = unit_match
+    candidate["advertisedUnitReason"] = unit_reason
+    reason, evidence = _shared_room_evidence(
+        advertisement_text,
+        target_beds,
+        _rent_value(candidate.get("rentPrice")),
+        structured_type,
+    )
+    if reason:
+        candidate["occupancyClassification"] = "shared-room"
+        candidate["occupancyReason"] = reason
+        candidate["occupancyEvidence"] = evidence
+    else:
+        reason, evidence = _full_unit_evidence(advertisement_text)
+        if reason:
+            candidate["occupancyClassification"] = "full-unit"
+            candidate["occupancyReason"] = reason
+            candidate["occupancyEvidence"] = evidence
+    return candidate
+
+
+def _rentfaster_occupancy_inspection_ids() -> set[str]:
+    """Return a small high-signal set of IDs whose pages warrant inspection.
+
+    Ordinary apartment buildings reuse IDs across bedroom feeds extensively,
+    so reuse alone is deliberately not enough to inspect hundreds of pages.
+    A higher-bedroom feed carrying a lower price prioritizes the page for
+    evidence inspection, but does not classify or exclude the listing.
+    """
+    observations: dict[str, list[tuple[int, int]]] = {}
+    for beds in (1, 2, 3, 4):
+        for listing in _rentfaster_api_listings(beds):
+            listing_id = str(listing.get("id") or listing.get("ref_id") or "").strip()
+            price = _rent_value(listing.get("price"))
+            if listing_id and price:
+                observations.setdefault(listing_id, []).append((beds, price))
+    inspection_ids = set()
+    for listing_id, values in observations.items():
+        ordered = sorted(set(values))
+        if any(
+            higher_beds > lower_beds and higher_price < lower_price
+            for lower_beds, lower_price in ordered
+            for higher_beds, higher_price in ordered
+        ):
+            inspection_ids.add(listing_id)
+    return inspection_ids
+
+
 def _collect_rentfaster(driver, unit_type: str) -> tuple[list[dict], dict]:
     beds, normalized_unit, rentfaster_slug, _ = _unit_details(unit_type)
     params = [
@@ -346,6 +538,10 @@ def _collect_rentfaster(driver, unit_type: str) -> tuple[list[dict], dict]:
             "The search page was unavailable to the browser; collected {count} active "
             "exact-bedroom listing(s) from RentFaster's public listing API instead."
         )
+    try:
+        occupancy_inspection_ids = _rentfaster_occupancy_inspection_ids() if beds else set()
+    except Exception:
+        occupancy_inspection_ids = set()
     candidates = []
     for listing in listings:
         if str(listing.get("availability", "")).lower() == "no vacancy":
@@ -361,8 +557,7 @@ def _collect_rentfaster(driver, unit_type: str) -> tuple[list[dict], dict]:
         listing_address = _rentfaster_listing_address(listing)
         listing_url = _rentfaster_listing_url(listing.get("link"))
         source_listing_id = str(listing.get("id") or listing.get("ref_id") or "").strip()
-        candidates.append(
-            {
+        candidate = {
                 "companyName": "Independent",
                 "buildingName": listing.get("title") or listing_address or "RentFaster listing",
                 "address": listing_address,
@@ -391,7 +586,26 @@ def _collect_rentfaster(driver, unit_type: str) -> tuple[list[dict], dict]:
                 "isVerified": True,
                 "verifiedAt": date.today().isoformat(),
                 "promotionText": promotions,
+                "advertisementTitle": listing.get("title") or "",
+                "_occupancyInspectionRequested": source_listing_id in occupancy_inspection_ids,
             }
+        advertisement_text = "\n".join(
+            str(value)
+            for value in (
+                listing.get("title"),
+                listing.get("intro"),
+                listing.get("type"),
+                _string_list(listing.get("promotions")),
+            )
+            if value
+        )
+        candidates.append(
+            _annotate_occupancy(
+                candidate,
+                beds,
+                advertisement_text=advertisement_text,
+                structured_type=str(listing.get("type") or ""),
+            )
         )
     return candidates, {
         "name": "RentFaster",
@@ -480,8 +694,7 @@ def _collect_rentals(
             matching_plan = min((plan for plan in plans if plan.get("rent")), key=lambda plan: plan["rent"])
             parking = node.get("parking") or {}
             promotions = _string_list(node.get("promotions"))
-            candidates.append(
-                {
+            candidate = {
                     "companyName": "Independent",
                     "buildingName": node.get("rentalListingName") or address.get("street") or "Rentals.ca listing",
                     "address": f"{address.get('street', '')}, Calgary, AB {address.get('postalCode', '')}".strip(),
@@ -501,7 +714,27 @@ def _collect_rentals(
                     "isVerified": True,
                     "verifiedAt": date.today().isoformat(),
                     "promotionText": promotions,
+                    "sourceListingId": path,
+                    "advertisementTitle": node.get("rentalListingName") or "",
                 }
+            advertisement_text = "\n".join(
+                _string_list(value)
+                for value in (
+                    node.get("rentalListingName"),
+                    node.get("description"),
+                    node.get("summary"),
+                    node.get("rentalListingType"),
+                    matching_plan,
+                )
+                if value
+            )
+            candidates.append(
+                _annotate_occupancy(
+                    candidate,
+                    beds,
+                    advertisement_text=advertisement_text,
+                    structured_type=str(node.get("rentalListingType") or ""),
+                )
             )
             new_rows += 1
         if not new_rows:
@@ -885,8 +1118,7 @@ def _collect_apartments(
             continue
         if "mainstreet" in f"{lines[0]} {href}".lower():
             continue
-        candidates.append(
-            {
+        candidate = {
                 "companyName": "Independent",
                 "buildingName": lines[0],
                 "address": lines[1],
@@ -909,7 +1141,15 @@ def _collect_apartments(
                 "isVerified": True,
                 "verifiedAt": date.today().isoformat(),
                 "promotionText": next((line for line in lines if "free" in line.lower() or "special" in line.lower()), ""),
+                "sourceListingId": href.split("#", 1)[0],
+                "advertisementTitle": lines[0],
             }
+        candidates.append(
+            _annotate_occupancy(
+                candidate,
+                beds,
+                advertisement_text="\n".join(lines),
+            )
         )
     return candidates, {
         "name": "Apartments.com",
@@ -961,6 +1201,88 @@ def _link_check_verdict(driver, url: str) -> str:
         if state.get("ready") == "complete" and title:
             return "alive"
     return "inconclusive"
+
+
+def _advertisement_page_text(driver, url: str) -> str:
+    try:
+        driver.get(url)
+    except WebDriverException:
+        return ""
+    deadline = time.monotonic() + LINK_CHECK_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        try:
+            state = driver.execute_script(
+                """
+                return {
+                  title: String(document.title || ""),
+                  ready: document.readyState,
+                  bodyText: String((document.body || {}).innerText || "").slice(0, 120000),
+                };
+                """
+            )
+        except WebDriverException:
+            return ""
+        title = str(state.get("title", "")).lower()
+        if "just a moment" in title or "access denied" in title:
+            return ""
+        body_text = str(state.get("bodyText", ""))
+        if state.get("ready") == "complete" and body_text:
+            return body_text
+    return ""
+
+
+def _classify_occupancy_pages(candidates: list[dict], target_beds: int) -> None:
+    to_inspect = [
+        row
+        for row in candidates
+        if row.get("sourceWebsite") == "RentFaster"
+        and row.get("_occupancyInspectionRequested")
+        and row.get("occupancyClassification") != "shared-room"
+        and row.get("listingUrl")
+    ]
+    if to_inspect:
+        try:
+            driver = _get_fresh_driver()
+        except Exception as error:
+            print(f"occupancy_check_unavailable error={error!r}", flush=True)
+            driver = None
+        if driver is not None:
+            try:
+                for row in to_inspect:
+                    page_text = _advertisement_page_text(driver, row["listingUrl"])
+                    if not page_text:
+                        continue
+                    unit_match, unit_reason = _unit_description_match(
+                        str(row.get("advertisementTitle") or row.get("buildingName") or ""),
+                        target_beds,
+                        page_text,
+                    )
+                    row["advertisedUnitMatch"] = unit_match
+                    row["advertisedUnitReason"] = unit_reason
+                    reason, evidence = _shared_room_evidence(
+                        page_text,
+                        target_beds,
+                        _rent_value(row.get("rentPrice")),
+                    )
+                    if reason:
+                        row["occupancyClassification"] = "shared-room"
+                        row["occupancyReason"] = reason
+                        row["occupancyEvidence"] = evidence
+                        existing_text = str(row.get("advertisementText") or "").strip()
+                        row["advertisementText"] = "\n".join(
+                            part for part in (existing_text, evidence) if part
+                        )[:8000]
+                    elif row.get("occupancyClassification") == "unknown":
+                        reason, evidence = _full_unit_evidence(page_text)
+                        if reason:
+                            row["occupancyClassification"] = "full-unit"
+                            row["occupancyReason"] = reason
+                            row["occupancyEvidence"] = evidence
+            finally:
+                _shutdown_browser()
+    for row in candidates:
+        row.pop("_occupancyInspectionRequested", None)
 
 
 def _remove_dead_links(candidates: list[dict]) -> list[dict]:
@@ -1038,6 +1360,8 @@ def collect_browser_candidates(
                 lambda driver: _collect_apartments(driver, unit_type, apartment_seeds, origin, our_rent),
             )
         )
+        target_beds = _unit_details(unit_type)[0]
+        _classify_occupancy_pages(candidates, target_beds)
         candidates = _remove_dead_links(candidates)
         for status in statuses:
             survivors = sum(1 for row in candidates if row.get("sourceWebsite") == status.get("name"))
