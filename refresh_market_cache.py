@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import uuid
 from datetime import datetime, timezone
 
-from browser_collector import collect_browser_candidates
 from supabase_cache import SupabaseMarketCache
 
 
@@ -22,6 +22,19 @@ def skip_if_fresh_enabled() -> bool:
 
 
 SKIPPED_ERROR_MARKER = "skipped: cache already fresh"
+INTERRUPTED_ERROR_MARKER = "interrupted: runner terminated before completion"
+
+
+def install_termination_handlers() -> None:
+    """Convert SIGTERM/SIGINT into SystemExit so an in-flight job can be
+    closed as failed before the process dies (GitHub cancellation sends
+    SIGINT then SIGTERM to the runner process tree)."""
+
+    def _terminate(signum, frame):
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, _terminate)
 
 
 def record_skipped_job(cache: SupabaseMarketCache, job_id: str) -> None:
@@ -100,6 +113,10 @@ def refresh_unit_type(cache: SupabaseMarketCache, unit_type: str) -> bool:
         return True
     cache.update_job(job_id, "collecting")
     try:
+        # Imported lazily so job bookkeeping (and tests) don't require the
+        # heavyweight browser stack at module import time.
+        from browser_collector import collect_browser_candidates
+
         collected = collect_browser_candidates(unit_type)
         collected = omit_failed_sources(collected)
         missing_sources = missing_required_sources(collected)
@@ -121,9 +138,22 @@ def refresh_unit_type(cache: SupabaseMarketCache, unit_type: str) -> bool:
         cache.fail_job(job_id, error)
         print(f"market_cache_refresh_failed unit_type={unit_type!r} error={error!r}", flush=True)
         return False
+    except BaseException:
+        # Cancellation/termination (SystemExit, KeyboardInterrupt): close the
+        # active job as failed when possible, then let the interrupt proceed.
+        try:
+            cache.fail_job(job_id, RuntimeError(INTERRUPTED_ERROR_MARKER))
+            print(
+                f"market_cache_refresh_interrupted unit_type={unit_type!r} job_id={job_id!r}",
+                flush=True,
+            )
+        except Exception:
+            pass
+        raise
 
 
 def main(arguments: list[str] | None = None) -> int:
+    install_termination_handlers()
     cache = SupabaseMarketCache()
     if not cache.enabled:
         print("SUPABASE_URL and SUPABASE_SECRET_KEY are required.", file=sys.stderr)
