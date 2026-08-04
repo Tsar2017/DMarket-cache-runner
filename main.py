@@ -173,6 +173,19 @@ def refresh_one_unit_type(cache, unit_type: str) -> bool:
     return False
 
 
+def reconcile_abandoned_jobs(cache) -> list[str]:
+    """Bounded cleanup of orphaned queued/collecting job rows left behind by
+    cancelled or interrupted runners. Never blocks the refresh itself."""
+    try:
+        closed = cache.fail_abandoned_jobs()
+    except Exception as error:
+        print(f"abandoned_job_cleanup_failed error={error!r}", flush=True)
+        return []
+    for job_id in closed:
+        print(f"abandoned_job_closed job_id={job_id!r}", flush=True)
+    return closed
+
+
 def selected_unit_types(arguments: list[str]) -> tuple[str, ...]:
     if not arguments:
         return UNIT_TYPES
@@ -195,6 +208,7 @@ def main(arguments: list[str] | None = None) -> int:
         return 2
 
     cache = SupabaseMarketCache()
+    reconcile_abandoned_jobs(cache)
     failed = [
         unit_type
         for unit_type in unit_types
