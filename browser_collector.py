@@ -243,7 +243,7 @@ def _rentfaster_street_address(value) -> str:
 
 
 def _rentfaster_address_from_link(link) -> str:
-    path = unquote(urlparse(str(link or "")).path)
+    path = unquote(urlparse(str(link or "")).path).rstrip("/")
     match = re.search(r"/properties/([^/?#]+)$", path, flags=re.I)
     if not match:
         return ""
