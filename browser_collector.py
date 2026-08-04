@@ -485,12 +485,44 @@ def _address_tokens(value: str) -> list[str]:
     return re.findall(r"[a-z]+|\d+", value)
 
 
+_STREET_TYPE_TOKENS = {"st", "ave", "rd", "dr", "blvd", "pl", "ct", "cres", "trl"}
+
+
+def _street_types_conflict(candidate_tokens: list[str], result_text: str) -> bool:
+    """True when the result names the candidate's street with a different type.
+
+    Catches "12 Ave SW" being matched against "12th St SW": the token before
+    the candidate's street type ("12") appears in the result immediately
+    followed by a different street type and never by the right one. Building
+    names that merely contain "Place"/"Court" do not trigger a conflict.
+    """
+    result_sequence = _address_tokens(result_text)
+    for index in range(1, len(candidate_tokens)):
+        type_token = candidate_tokens[index]
+        if type_token not in _STREET_TYPE_TOKENS:
+            continue
+        street_token = candidate_tokens[index - 1]
+        followers = {
+            result_sequence[position + 1]
+            for position, token in enumerate(result_sequence[:-1])
+            if token == street_token and result_sequence[position + 1] in _STREET_TYPE_TOKENS
+        }
+        if followers and type_token not in followers:
+            return True
+    return False
+
+
 def _address_matches(candidate_address: str, result_text: str) -> bool:
     street_address = candidate_address.split(", Calgary", 1)[0].split(", AB", 1)[0]
     candidate_tokens = _address_tokens(street_address)
     result_tokens = set(_address_tokens(result_text))
-    ignored = {"st", "ave", "rd", "dr", "blvd", "pl", "ct", "cres", "trl"}
-    significant = [token for token in candidate_tokens if token not in ignored]
+    significant = [token for token in candidate_tokens if token not in _STREET_TYPE_TOKENS]
+    if not any(token.isdigit() for token in significant):
+        # Seeds like "Centre Street N" or "Northwest Calgary" carry no house
+        # number, so any match against them is guesswork.
+        return False
+    if _street_types_conflict(candidate_tokens, result_text):
+        return False
     return len(significant) >= 2 and all(token in result_tokens for token in significant)
 
 
@@ -508,7 +540,21 @@ def _address_matches_loose(candidate_address: str, result_text: str) -> bool:
     quadrants = {"nw", "ne", "sw", "se"}
     numbers = [token for token in candidate_tokens if token.isdigit()]
     required = list(numbers) + [token for token in candidate_tokens if token in quadrants]
-    return len(required) >= 2 and all(token in result_tokens for token in required)
+    if len(required) < 2 or not all(token in result_tokens for token in required):
+        return False
+    if _street_types_conflict(candidate_tokens, result_text):
+        # "12 Ave SW" must never match "12th St SW".
+        return False
+    name_tokens = [
+        token
+        for token in candidate_tokens
+        if not token.isdigit() and token not in quadrants and token not in _STREET_TYPE_TOKENS
+    ]
+    if name_tokens and not any(token in result_tokens for token in name_tokens):
+        # A named street ("Falconridge Gardens NE") must share at least one
+        # name word with the result, or the numeric match is coincidence.
+        return False
+    return True
 
 
 def _is_direct_apartments_url(url: str) -> bool:
@@ -618,6 +664,10 @@ def _find_indexed_apartments_page(seed: dict) -> tuple[str, str] | None:
                 continue
             for listing_url, result_text, title in results:
                 if not _is_direct_apartments_url(listing_url):
+                    continue
+                if "calgary" not in urlparse(listing_url).path.lower():
+                    # Calgary property slugs always carry "-calgary-ab"; this
+                    # rejects same-numbered listings from other cities.
                     continue
                 if "0 units available" in result_text.lower():
                     continue
