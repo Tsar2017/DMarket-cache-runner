@@ -124,14 +124,31 @@ def refresh_one_unit_type(cache, unit_type: str) -> bool:
     return False
 
 
-def main() -> int:
+def selected_unit_types(arguments: list[str]) -> tuple[str, ...]:
+    if not arguments:
+        return UNIT_TYPES
+    if len(arguments) != 1 or arguments[0] not in UNIT_TYPES:
+        choices = ", ".join(UNIT_TYPES)
+        raise ValueError(f"Expected one unit type ({choices}).")
+    return (arguments[0],)
+
+
+def main(arguments: list[str] | None = None) -> int:
     configure_environment()
     from supabase_cache import SupabaseMarketCache
+
+    try:
+        unit_types = selected_unit_types(
+            sys.argv[1:] if arguments is None else arguments
+        )
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
 
     cache = SupabaseMarketCache()
     failed = [
         unit_type
-        for unit_type in UNIT_TYPES
+        for unit_type in unit_types
         if not refresh_one_unit_type(cache, unit_type)
     ]
     if failed:
