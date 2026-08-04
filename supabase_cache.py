@@ -13,6 +13,11 @@ class SupabaseCacheError(RuntimeError):
     pass
 
 
+ABANDONED_JOB_ERROR = "abandoned: runner interrupted before job completion"
+ABANDONED_JOB_MIN_AGE_MINUTES = 90
+ABANDONED_JOB_CLEANUP_LIMIT = 25
+
+
 def normalize_supabase_url(value: str) -> str:
     url = value.strip().rstrip("/")
     if not url:
@@ -208,6 +213,46 @@ class SupabaseMarketCache:
                 {"status": "failed", "error": str(error)[:1000]},
             )
             raise
+
+    def fail_abandoned_jobs(
+        self,
+        older_than_minutes: int = ABANDONED_JOB_MIN_AGE_MINUTES,
+        limit: int = ABANDONED_JOB_CLEANUP_LIMIT,
+    ) -> list[str]:
+        """Mark genuinely abandoned queued/collecting jobs as failed.
+
+        Only touches rows whose last update is older than ``older_than_minutes``
+        (so recent, legitimately active jobs are never closed) and processes at
+        most ``limit`` rows per call so the reconciliation step stays bounded.
+        Returns the ids of the jobs that were closed."""
+        older_than_minutes = max(1, int(older_than_minutes))
+        limit = max(1, int(limit))
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+        ).isoformat()
+        query = urlencode(
+            {
+                "select": "id,status,updated_at",
+                "status": "in.(queued,collecting)",
+                "updated_at": f"lt.{cutoff}",
+                "order": "updated_at.asc",
+                "limit": str(limit),
+            }
+        )
+        rows = self._request("GET", f"market_collection_jobs?{query}") or []
+        closed: list[str] = []
+        for row in rows:
+            job_id = row.get("id")
+            if not job_id:
+                continue
+            self.update_job(
+                job_id,
+                "failed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error=ABANDONED_JOB_ERROR,
+            )
+            closed.append(job_id)
+        return closed
 
     def fail_job(self, job_id: str, error: Exception) -> None:
         self.update_job(
