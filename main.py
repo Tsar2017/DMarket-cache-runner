@@ -15,7 +15,7 @@ from typing import Callable
 
 REQUIRED_SOURCES = {"RentFaster", "Rentals.ca"}
 UNIT_TYPES = ("Bachelor", "1 bedroom", "2 bedroom", "3 bedroom", "4 bedroom")
-MARKET_CACHE_PAYLOAD_VERSION = 2
+MARKET_CACHE_PAYLOAD_VERSION = 3
 
 
 def configure_environment() -> None:
@@ -46,7 +46,9 @@ def configure_environment() -> None:
 
 
 def cache_is_runner_fresh(
-    existing: dict | None, now: datetime | None = None
+    existing: dict | None,
+    now: datetime | None = None,
+    unit_type: str | None = None,
 ) -> bool:
     if not existing or not existing.get("collectedAt"):
         return False
@@ -57,8 +59,13 @@ def cache_is_runner_fresh(
         row.get("sourceWebsite") for row in existing.get("candidates", [])
     }
     candidates = existing.get("candidates", [])
+    required_payload_version = (
+        MARKET_CACHE_PAYLOAD_VERSION
+        if unit_type in {"2 bedroom", "3 bedroom"}
+        else 0
+    )
     payload_is_current = bool(candidates) and all(
-        row.get("marketCachePayloadVersion") == MARKET_CACHE_PAYLOAD_VERSION
+        int(row.get("marketCachePayloadVersion") or 0) >= required_payload_version
         for row in candidates
     )
     current_time = now or datetime.now(timezone.utc)
@@ -86,7 +93,7 @@ def record_fresh_skip(
 
 def refresh_one_unit_type(cache, unit_type: str) -> bool:
     existing = cache.load_latest(unit_type)
-    if cache_is_runner_fresh(existing):
+    if cache_is_runner_fresh(existing, unit_type=unit_type):
         job_id = record_fresh_skip(cache, unit_type)
         print(
             f"isolated_refresh_skip_fresh unit_type={unit_type!r} job_id={job_id!r}",
