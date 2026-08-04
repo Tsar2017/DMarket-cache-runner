@@ -1,13 +1,14 @@
-name: Daily GitHub Traffic Analysis
+name: Refresh DMarkeT market cache
 
 on:
   schedule:
-    - cron: '0 23 * * *'
+    - cron: '17 */4 * * *'
   workflow_dispatch:
 
 jobs:
-  analyze-traffic:
+  refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
@@ -22,29 +23,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install PyGithub python-dotenv
 
-      - name: Run main.py
+      - name: Refresh all bedroom caches
         env:
           GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
         run: |
-          python main.py
-
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Add changes
-        run: |
-          git add .
-
-      - name: Commit changes
-        run: |
-          git commit -m "chore: update traffic analysis data [skip ci]" || echo "No changes to commit"
-
-      - name: Push changes
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git push
+          xvfb-run --auto-servernum --server-args="-screen 0 1024x768x24" python main.py
