@@ -45,6 +45,10 @@ BROWSER_USER_AGENT = (
 APARTMENTS_BROWSER_USER_AGENT = BROWSER_USER_AGENT
 LINK_CHECK_SECONDS = max(4, int(os.environ.get("LINK_CHECK_SECONDS", "12")))
 MAX_LINK_CHECKS_PER_SOURCE = max(1, int(os.environ.get("MAX_LINK_CHECKS_PER_SOURCE", "40")))
+APARTMENTS_INDEX_BUDGET_SECONDS = max(
+    30,
+    int(os.environ.get("APARTMENTS_INDEX_BUDGET_SECONDS", "120")),
+)
 MARKET_CACHE_PAYLOAD_VERSION = 3
 
 
@@ -888,10 +892,13 @@ def _is_direct_apartments_url(url: str) -> bool:
     return path_parts[0] not in category_roots
 
 
-def _yahoo_index_results(query: str) -> list[tuple[str, str, str]]:
+def _yahoo_index_results(
+    query: str,
+    timeout_seconds: float = 20,
+) -> list[tuple[str, str, str]]:
     search_url = "https://search.yahoo.com/search?p=" + quote(query)
     request = Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
-    page = urlopen(request, timeout=20).read().decode("utf-8", "replace")
+    page = urlopen(request, timeout=timeout_seconds).read().decode("utf-8", "replace")
     results = []
     for match in re.finditer(
         r"RU=(https?%3a%2f%2f(?:www\.)?apartments\.com%2f.*?)/RK=",
@@ -909,10 +916,13 @@ def _yahoo_index_results(query: str) -> list[tuple[str, str, str]]:
     return results
 
 
-def _bing_index_results(query: str) -> list[tuple[str, str, str]]:
+def _bing_index_results(
+    query: str,
+    timeout_seconds: float = 20,
+) -> list[tuple[str, str, str]]:
     search_url = "https://www.bing.com/search?q=" + quote(query)
     request = Request(search_url, headers={"User-Agent": BROWSER_USER_AGENT, "Accept-Language": "en-CA,en;q=0.9"})
-    page = urlopen(request, timeout=20).read().decode("utf-8", "replace")
+    page = urlopen(request, timeout=timeout_seconds).read().decode("utf-8", "replace")
     results = []
     for block in re.finditer(r'<li class="b_algo".*?(?=<li class="b_algo"|</ol>)', page, re.I | re.S):
         markup = block.group(0)
@@ -926,10 +936,13 @@ def _bing_index_results(query: str) -> list[tuple[str, str, str]]:
     return results
 
 
-def _duckduckgo_index_results(query: str) -> list[tuple[str, str, str]]:
+def _duckduckgo_index_results(
+    query: str,
+    timeout_seconds: float = 20,
+) -> list[tuple[str, str, str]]:
     search_url = "https://html.duckduckgo.com/html/?q=" + quote(query)
     request = Request(search_url, headers={"User-Agent": BROWSER_USER_AGENT, "Accept-Language": "en-CA,en;q=0.9"})
-    page = urlopen(request, timeout=20).read().decode("utf-8", "replace")
+    page = urlopen(request, timeout=timeout_seconds).read().decode("utf-8", "replace")
     results = []
     for block in re.finditer(r'<div class="result[^"]*".*?(?=<div class="result[^"]*"|</div>\s*</div>\s*</body>)', page, re.I | re.S):
         markup = block.group(0)
@@ -962,7 +975,10 @@ def _seed_queries(seed: dict) -> list[str]:
     return queries
 
 
-def _find_indexed_apartments_page(seed: dict) -> tuple[str, str] | None:
+def _find_indexed_apartments_page(
+    seed: dict,
+    deadline: float | None = None,
+) -> tuple[str, str] | None:
     """Locate the seed's direct Apartments.com property page via public search indexes.
 
     Tries several query variants across several search indexes; every
@@ -972,9 +988,21 @@ def _find_indexed_apartments_page(seed: dict) -> tuple[str, str] | None:
     """
     loose_fallback: tuple[str, str] | None = None
     for query in _seed_queries(seed):
+        if deadline is not None and time.monotonic() >= deadline:
+            return loose_fallback
         for _engine, fetch_results in _SEARCH_INDEXES:
+            remaining_seconds = (
+                deadline - time.monotonic()
+                if deadline is not None
+                else 20
+            )
+            if remaining_seconds <= 0:
+                return loose_fallback
             try:
-                results = fetch_results(query)
+                results = fetch_results(
+                    query,
+                    timeout_seconds=max(1, min(20, remaining_seconds)),
+                )
             except Exception:
                 continue
             for listing_url, result_text, title in results:
@@ -1006,6 +1034,7 @@ def _collect_indexed_apartments(
     origin: tuple[float, float] | None,
     our_rent: float | None,
 ) -> list[dict]:
+    deadline = time.monotonic() + APARTMENTS_INDEX_BUDGET_SECONDS
     eligible = []
     for seed in seed_candidates:
         rent = float(seed.get("rentPrice") or 0)
@@ -1026,8 +1055,15 @@ def _collect_indexed_apartments(
     candidates = []
     seen_urls = set()
     for _distance, _rent, seed in eligible[:36]:
+        if time.monotonic() >= deadline:
+            print(
+                "apartments_index_budget_exhausted "
+                f"unit_type={unit_type!r} budget_seconds={APARTMENTS_INDEX_BUDGET_SECONDS}",
+                flush=True,
+            )
+            break
         try:
-            match = _find_indexed_apartments_page(seed)
+            match = _find_indexed_apartments_page(seed, deadline=deadline)
         except Exception:
             continue
         if not match:
