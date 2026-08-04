@@ -45,6 +45,7 @@ BROWSER_USER_AGENT = (
 APARTMENTS_BROWSER_USER_AGENT = BROWSER_USER_AGENT
 LINK_CHECK_SECONDS = max(4, int(os.environ.get("LINK_CHECK_SECONDS", "12")))
 MAX_LINK_CHECKS_PER_SOURCE = max(1, int(os.environ.get("MAX_LINK_CHECKS_PER_SOURCE", "40")))
+MARKET_CACHE_PAYLOAD_VERSION = 2
 
 
 def _log_source(name: str, query: str, status: dict, started_at: float, error: Exception | None = None) -> None:
@@ -436,6 +437,7 @@ def _annotate_occupancy(
     advertisement_text: str = "",
     structured_type: str = "",
 ) -> dict:
+    candidate["marketCachePayloadVersion"] = MARKET_CACHE_PAYLOAD_VERSION
     title = str(candidate.get("advertisementTitle") or candidate.get("buildingName") or "")
     candidate["advertisementTitle"] = title
     candidate["occupancyClassification"] = "unknown"
