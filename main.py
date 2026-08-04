@@ -60,15 +60,6 @@ def cache_is_runner_fresh(
     sources = {
         row.get("sourceWebsite") for row in existing.get("candidates", [])
     }
-    statuses = {
-        status.get("name"): status.get("status")
-        for status in existing.get("statuses", [])
-        if status.get("name")
-    }
-    optional_sources_are_healthy = all(
-        statuses.get(source) in SUCCESSFUL_SOURCE_STATUSES
-        for source in SOURCE_STATUS_REQUIRED_FOR_FRESH_SKIP
-    )
     candidates = existing.get("candidates", [])
     required_payload_version = (
         MARKET_CACHE_PAYLOAD_VERSION
@@ -83,8 +74,22 @@ def cache_is_runner_fresh(
     return (
         current_time - collected_at < timedelta(hours=4)
         and REQUIRED_SOURCES <= sources
-        and optional_sources_are_healthy
+        and fresh_skip_sources_are_healthy(existing)
         and payload_is_current
+    )
+
+
+def fresh_skip_sources_are_healthy(existing: dict | None) -> bool:
+    if not existing:
+        return False
+    statuses = {
+        status.get("name"): status.get("status")
+        for status in existing.get("statuses", [])
+        if status.get("name")
+    }
+    return all(
+        statuses.get(source) in SUCCESSFUL_SOURCE_STATUSES
+        for source in SOURCE_STATUS_REQUIRED_FOR_FRESH_SKIP
     )
 
 
@@ -128,6 +133,7 @@ def refresh_one_unit_type(cache, unit_type: str) -> bool:
             flush=True,
         )
 
+    published_at_least_once = False
     for attempt in range(1, 4):
         profile = Path("/tmp") / (
             "dmarket-" + unit_type.replace(" ", "-") + f"-{attempt}"
@@ -139,15 +145,31 @@ def refresh_one_unit_type(cache, unit_type: str) -> bool:
             f"isolated_refresh unit_type={unit_type!r} attempt={attempt}",
             flush=True,
         )
-        if (
-            subprocess.call(
-                [sys.executable, "refresh_market_cache.py", unit_type],
-                env=environment,
-            )
-            == 0
-        ):
-            return True
-        time.sleep(5)
+        exit_code = subprocess.call(
+            [sys.executable, "refresh_market_cache.py", unit_type],
+            env=environment,
+        )
+        if exit_code == 0:
+            published_at_least_once = True
+            latest = cache.load_latest(unit_type)
+            if fresh_skip_sources_are_healthy(latest):
+                return True
+            if attempt < 3:
+                print(
+                    "isolated_refresh_retry_source "
+                    f"unit_type={unit_type!r} attempt={attempt} "
+                    "source='Apartments.com'",
+                    flush=True,
+                )
+        if attempt < 3:
+            time.sleep(5)
+    if published_at_least_once:
+        print(
+            "isolated_refresh_optional_source_unavailable "
+            f"unit_type={unit_type!r} source='Apartments.com' attempts=3",
+            flush=True,
+        )
+        return True
     return False
 
 
